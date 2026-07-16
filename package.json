@@ -1,0 +1,8 @@
+# Token you get from @BotFather
+BOT_TOKEN=123456789:AAExampleTokenHere
+
+# Your (admin/owner) Telegram chat id — payment requests will arrive here
+ADMIN_CHAT_ID=123456789
+
+# Server port (optional)
+PORT=3000

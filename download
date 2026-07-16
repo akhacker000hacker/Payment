@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Payment Confirmation</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #161a22;
+    --accent: #4f8cff;
+    --accent2: #22c55e;
+    --danger: #ef4444;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --border: #262c38;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(1200px 600px at 50% -10%, #1b2333, var(--bg));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Bengali", sans-serif;
+    color: var(--text);
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  }
+  h1 {
+    font-size: 20px;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  p.sub {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 0 0 22px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+    margin: 14px 0 6px;
+  }
+  input, select {
+    width: 100%;
+    padding: 12px 14px;
+    background: #10141c;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus, select:focus {
+    border-color: var(--accent);
+  }
+  button.submit-btn {
+    width: 100%;
+    margin-top: 22px;
+    padding: 13px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  button.submit-btn:hover { opacity: 0.9; }
+  button.submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .status-box {
+    display: none;
+    text-align: center;
+    padding: 10px 0 4px;
+  }
+  .spinner {
+    width: 46px; height: 46px;
+    margin: 8px auto 18px;
+    border: 4px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .status-title { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+  .status-sub { font-size: 13px; color: var(--muted); }
+  .ref-code {
+    margin-top: 16px;
+    font-size: 11px;
+    color: var(--muted);
+    word-break: break-all;
+    background: #10141c;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+
+  .icon-circle {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    margin: 0 auto 14px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px;
+  }
+  .icon-confirmed { background: rgba(34,197,94,0.15); color: var(--accent2); }
+  .icon-rejected { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+  .error-msg {
+    color: var(--danger);
+    font-size: 13px;
+    margin-top: 10px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div id="formView">
+    <h1>💳 Payment Details</h1>
+    <p class="sub">Enter the details below and we'll verify and confirm your payment.</p>
+
+    <form id="paymentForm">
+      <label>Tnx No.</label>
+      <input type="text" id="tnxNo" placeholder="Transaction Number" required />
+
+      <label>Amount</label>
+      <input type="number" id="amount" placeholder="e.g. 500" required />
+
+      <label>ATT No.</label>
+      <input type="text" id="attNo" placeholder="ATT Number" required />
+
+      <button type="submit" class="submit-btn" id="submitBtn">Submit</button>
+      <div class="error-msg" id="errorMsg"></div>
+    </form>
+  </div>
+
+  <div class="status-box" id="statusView">
+    <div id="statusInner"></div>
+  </div>
+</div>
+
+<script>
+  const API_BASE = ''; // same origin. Change if hosting frontend separately.
+
+  const form = document.getElementById('paymentForm');
+  const formView = document.getElementById('formView');
+  const statusView = document.getElementById('statusView');
+  const statusInner = document.getElementById('statusInner');
+  const submitBtn = document.getElementById('submitBtn');
+  const errorMsg = document.getElementById('errorMsg');
+
+  let pollTimer = null;
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorMsg.style.display = 'none';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Sending...';
+
+    const payload = {
+      tnxNo: document.getElementById('tnxNo').value.trim(),
+      amount: document.getElementById('amount').value.trim(),
+      attNo: document.getElementById('attNo').value.trim(),
+    };
+
+    try {
+      const res = await fetch(`${API_BASE}/api/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Something went wrong');
+      }
+
+      // Save unique id locally so a page refresh can resume checking
+      localStorage.setItem('paymentRefId', data.id);
+      showPending(data.id);
+      startPolling(data.id);
+    } catch (err) {
+      errorMsg.textContent = err.message;
+      errorMsg.style.display = 'block';
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit';
+    }
+  });
+
+  function showPending(id) {
+    formView.style.display = 'none';
+    statusView.style.display = 'block';
+    statusInner.innerHTML = `
+      <div class="spinner"></div>
+      <div class="status-title">Waiting for confirmation...</div>
+      <div class="status-sub">Your payment is being reviewed. Please wait.</div>
+      <div class="ref-code">Ref ID: ${id}</div>
+    `;
+  }
+
+  function showConfirmed() {
+    statusInner.innerHTML = `
+      <div class="icon-circle icon-confirmed">✓</div>
+      <div class="status-title">Payment Confirmed!</div>
+      <div class="status-sub">Your payment has been successfully confirmed. Thank you!</div>
+    `;
+    localStorage.removeItem('paymentRefId');
+  }
+
+  function showRejected() {
+    statusInner.innerHTML = `
+      <div class="icon-circle icon-rejected">✕</div>
+      <div class="status-title">Payment Rejected</div>
+      <div class="status-sub">Your payment could not be verified. Please contact support.</div>
+    `;
+    localStorage.removeItem('paymentRefId');
+  }
+
+  function startPolling(id) {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/status/${id}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.status === 'confirmed') {
+          clearInterval(pollTimer);
+          showConfirmed();
+        } else if (data.status === 'rejected') {
+          clearInterval(pollTimer);
+          showRejected();
+        }
+      } catch (err) {
+        // ignore transient network errors, keep polling
+      }
+    }, 3000);
+  }
+
+  // Resume checking if user refreshes the page mid-wait
+  window.addEventListener('DOMContentLoaded', () => {
+    const savedId = localStorage.getItem('paymentRefId');
+    if (savedId) {
+      showPending(savedId);
+      startPolling(savedId);
+    }
+  });
+</script>
+
+</body>
+</html>
