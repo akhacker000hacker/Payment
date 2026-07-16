@@ -221,6 +221,7 @@
       <div class="icon-circle icon-confirmed">✓</div>
       <div class="status-title">Payment Confirmed!</div>
       <div class="status-sub">Your payment has been successfully confirmed. Thank you!</div>
+      <button class="submit-btn" style="margin-top:18px" onclick="resetForm()">Submit New Payment</button>
     `;
     localStorage.removeItem('paymentRefId');
   }
@@ -230,16 +231,55 @@
       <div class="icon-circle icon-rejected">✕</div>
       <div class="status-title">Payment Rejected</div>
       <div class="status-sub">Your payment could not be verified. Please contact support.</div>
+      <button class="submit-btn" style="margin-top:18px" onclick="resetForm()">Submit New Payment</button>
     `;
     localStorage.removeItem('paymentRefId');
   }
 
+  function showExpired() {
+    statusInner.innerHTML = `
+      <div class="icon-circle icon-rejected">!</div>
+      <div class="status-title">Request Expired</div>
+      <div class="status-sub">This payment request could not be found. It may have expired or the server restarted. Please submit a new payment.</div>
+      <button class="submit-btn" style="margin-top:18px" onclick="resetForm()">Submit New Payment</button>
+    `;
+    localStorage.removeItem('paymentRefId');
+  }
+
+  // Clears state and brings the user back to a fresh form
+  function resetForm() {
+    localStorage.removeItem('paymentRefId');
+    if (pollTimer) clearInterval(pollTimer);
+    form.reset();
+    errorMsg.style.display = 'none';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Submit';
+    statusView.style.display = 'none';
+    formView.style.display = 'block';
+  }
+
   function startPolling(id) {
     if (pollTimer) clearInterval(pollTimer);
+    let notFoundCount = 0;
+
     pollTimer = setInterval(async () => {
       try {
         const res = await fetch(`${API_BASE}/api/status/${id}`);
+
+        if (res.status === 404) {
+          // Require 2 consecutive 404s before giving up, to avoid
+          // reacting to a brief server restart/redeploy blip
+          notFoundCount++;
+          if (notFoundCount >= 2) {
+            clearInterval(pollTimer);
+            showExpired();
+          }
+          return;
+        }
+
+        notFoundCount = 0;
         if (!res.ok) return;
+
         const data = await res.json();
         if (data.status === 'confirmed') {
           clearInterval(pollTimer);
