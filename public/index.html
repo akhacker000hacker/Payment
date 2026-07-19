@@ -3,17 +3,17 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Payment Confirmation</title>
+<title>Force Android — Payment</title>
 <style>
   :root {
-    --bg: #0f1115;
-    --card: #161a22;
-    --accent: #4f8cff;
+    --bg:      #0f1115;
+    --card:    #161a22;
+    --accent:  #4f8cff;
     --accent2: #22c55e;
-    --danger: #ef4444;
-    --text: #e6e9ef;
-    --muted: #8b93a3;
-    --border: #262c38;
+    --danger:  #ef4444;
+    --text:    #e6e9ef;
+    --muted:   #8b93a3;
+    --border:  #262c38;
   }
   * { box-sizing: border-box; }
   body {
@@ -65,8 +65,11 @@
     outline: none;
     transition: border-color 0.15s;
   }
-  input:focus, select:focus {
-    border-color: var(--accent);
+  input:focus { border-color: var(--accent); }
+  input[readonly] {
+    opacity: 0.6;
+    cursor: default;
+    border-color: var(--border);
   }
   button.submit-btn {
     width: 100%;
@@ -83,6 +86,23 @@
   }
   button.submit-btn:hover { opacity: 0.9; }
   button.submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.return-btn {
+    width: 100%;
+    margin-top: 14px;
+    padding: 13px;
+    background: #22c55e;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    display: block;
+    text-align: center;
+    transition: opacity 0.15s;
+  }
+  button.return-btn:hover { opacity: 0.9; }
 
   .status-box {
     display: none;
@@ -100,7 +120,7 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   .status-title { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
-  .status-sub { font-size: 13px; color: var(--muted); }
+  .status-sub   { font-size: 13px; color: var(--muted); }
   .ref-code {
     margin-top: 16px;
     font-size: 11px;
@@ -111,7 +131,6 @@
     border-radius: 8px;
     padding: 8px 10px;
   }
-
   .icon-circle {
     width: 64px; height: 64px;
     border-radius: 50%;
@@ -120,13 +139,25 @@
     font-size: 30px;
   }
   .icon-confirmed { background: rgba(34,197,94,0.15); color: var(--accent2); }
-  .icon-rejected { background: rgba(239,68,68,0.15); color: var(--danger); }
+  .icon-rejected  { background: rgba(239,68,68,0.15);  color: var(--danger);  }
 
   .error-msg {
     color: var(--danger);
     font-size: 13px;
     margin-top: 10px;
     display: none;
+  }
+  .uid-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(79,140,255,0.1);
+    border: 1px solid rgba(79,140,255,0.3);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--accent);
+    margin-bottom: 18px;
   }
 </style>
 </head>
@@ -135,19 +166,25 @@
 <div class="card">
   <div id="formView">
     <h1>💳 Payment Details</h1>
-    <p class="sub">Enter the details below and we'll verify and confirm your payment.</p>
+    <p class="sub">Enter your payment details below. We'll verify and confirm your payment.</p>
+
+    <!-- User ID badge (shown when uid is in URL) -->
+    <div class="uid-badge" id="uidBadge" style="display:none;">
+      🤖 Telegram ID: <strong id="uidDisplay"></strong>
+    </div>
 
     <form id="paymentForm">
+
       <label>Tnx No.</label>
       <input type="text" id="tnxNo" placeholder="Transaction Number" required />
 
-      <label>Amount</label>
-      <input type="number" id="amount" placeholder="e.g. 500" required />
+      <label>Amount (₹)</label>
+      <input type="number" id="amount" placeholder="e.g. 300" required />
 
-      <label>OTP.</label>
-      <input type="text" id="attNo" placeholder="OTP" required />
+      <label>ATT No.</label>
+      <input type="text" id="attNo" placeholder="ATT Number" required />
 
-      <button type="submit" class="submit-btn" id="submitBtn">Submit</button>
+      <button type="submit" class="submit-btn" id="submitBtn">Submit Payment</button>
       <div class="error-msg" id="errorMsg"></div>
     </form>
   </div>
@@ -158,69 +195,98 @@
 </div>
 
 <script>
-  const API_BASE = ''; // same origin. Change if hosting frontend separately.
+  const API_BASE    = '';
+  const BOT_REDIRECT_BASE = 'https://t.me/'; // BOT_USERNAME appended dynamically
 
-  const form = document.getElementById('paymentForm');
-  const formView = document.getElementById('formView');
+  // --- Read uid from URL query param ---
+  const params = new URLSearchParams(window.location.search);
+  const uid    = params.get('uid') || null;
+
+  // Show uid badge if present
+  if (uid) {
+    document.getElementById('uidBadge').style.display   = 'inline-flex';
+    document.getElementById('uidDisplay').textContent    = uid;
+  }
+
+  const form       = document.getElementById('paymentForm');
+  const formView   = document.getElementById('formView');
   const statusView = document.getElementById('statusView');
-  const statusInner = document.getElementById('statusInner');
-  const submitBtn = document.getElementById('submitBtn');
-  const errorMsg = document.getElementById('errorMsg');
+  const statusInner= document.getElementById('statusInner');
+  const submitBtn  = document.getElementById('submitBtn');
+  const errorMsg   = document.getElementById('errorMsg');
 
-  let pollTimer = null;
+  let pollTimer    = null;
+  let botUsername  = '';  // filled by server or set statically below
+
+  // Fetch bot username from server (optional helper endpoint)
+  fetch('/api/config')
+    .then(r => r.json())
+    .then(d => { botUsername = d.botUsername || ''; })
+    .catch(() => {});
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     errorMsg.style.display = 'none';
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Sending...';
+    submitBtn.disabled     = true;
+    submitBtn.textContent  = 'Sending...';
 
     const payload = {
-      tnxNo: document.getElementById('tnxNo').value.trim(),
+      tnxNo:  document.getElementById('tnxNo').value.trim(),
       amount: document.getElementById('amount').value.trim(),
-      attNo: document.getElementById('attNo').value.trim(),
+      attNo:  document.getElementById('attNo').value.trim(),
+      uid:    uid,   // Telegram chat ID — may be null
     };
 
     try {
-      const res = await fetch(`${API_BASE}/api/submit`, {
-        method: 'POST',
+      const res  = await fetch(`${API_BASE}/api/submit`, {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body:    JSON.stringify(payload),
       });
       const data = await res.json();
 
-      if (!res.ok) {
-        throw new Error(data.error || 'Something went wrong');
-      }
+      if (!res.ok) throw new Error(data.error || 'Something went wrong');
 
-      // Save unique id locally so a page refresh can resume checking
       localStorage.setItem('paymentRefId', data.id);
-      showPending(data.id);
-      startPolling(data.id);
+      showSubmitted(data.id);
+
     } catch (err) {
-      errorMsg.textContent = err.message;
+      errorMsg.textContent  = err.message;
       errorMsg.style.display = 'block';
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Submit';
+      submitBtn.disabled    = false;
+      submitBtn.textContent = 'Submit Payment';
     }
   });
 
-  function showPending(id) {
-    formView.style.display = 'none';
+  function showSubmitted(id) {
+    formView.style.display  = 'none';
     statusView.style.display = 'block';
+
+    const botLink = botUsername
+      ? `https://t.me/${botUsername}?start=paysent`
+      : null;
+
     statusInner.innerHTML = `
-      <div class="spinner"></div>
-      <div class="status-title">Waiting for confirmation...</div>
-      <div class="status-sub">Your payment is being reviewed. Please wait.</div>
+      <div class="icon-circle icon-confirmed">✓</div>
+      <div class="status-title">Payment Submitted!</div>
+      <div class="status-sub">
+        Your payment is under review.<br>
+        You will be notified in Telegram once it's approved.
+      </div>
       <div class="ref-code">Ref ID: ${id}</div>
+      ${botLink
+        ? `<a href="${botLink}" class="return-btn">↩ Return to Bot</a>`
+        : '<div style="margin-top:14px;font-size:13px;color:var(--muted);">Return to your Telegram bot for updates.</div>'
+      }
     `;
+    localStorage.removeItem('paymentRefId');
   }
 
   function showConfirmed() {
     statusInner.innerHTML = `
       <div class="icon-circle icon-confirmed">✓</div>
       <div class="status-title">Payment Confirmed!</div>
-      <div class="status-sub">Your payment has been successfully confirmed. Thank you!</div>
+      <div class="status-sub">Your payment has been successfully confirmed. Credits will be added shortly.</div>
       <button class="submit-btn" style="margin-top:18px" onclick="resetForm()">Submit New Payment</button>
     `;
     localStorage.removeItem('paymentRefId');
@@ -231,7 +297,7 @@
       <div class="icon-circle icon-rejected">✕</div>
       <div class="status-title">Payment Rejected</div>
       <div class="status-sub">Your payment could not be verified. Please contact support.</div>
-      <button class="submit-btn" style="margin-top:18px" onclick="resetForm()">Submit New Payment</button>
+      <button class="submit-btn" style="margin-top:18px" onclick="resetForm()">Try Again</button>
     `;
     localStorage.removeItem('paymentRefId');
   }
@@ -246,16 +312,15 @@
     localStorage.removeItem('paymentRefId');
   }
 
-  // Clears state and brings the user back to a fresh form
   function resetForm() {
     localStorage.removeItem('paymentRefId');
     if (pollTimer) clearInterval(pollTimer);
     form.reset();
     errorMsg.style.display = 'none';
-    submitBtn.disabled = false;
-    submitBtn.textContent = 'Submit';
+    submitBtn.disabled     = false;
+    submitBtn.textContent  = 'Submit Payment';
     statusView.style.display = 'none';
-    formView.style.display = 'block';
+    formView.style.display   = 'block';
   }
 
   function startPolling(id) {
@@ -267,13 +332,8 @@
         const res = await fetch(`${API_BASE}/api/status/${id}`);
 
         if (res.status === 404) {
-          // Require 2 consecutive 404s before giving up, to avoid
-          // reacting to a brief server restart/redeploy blip
           notFoundCount++;
-          if (notFoundCount >= 2) {
-            clearInterval(pollTimer);
-            showExpired();
-          }
+          if (notFoundCount >= 2) { clearInterval(pollTimer); showExpired(); }
           return;
         }
 
@@ -281,26 +341,16 @@
         if (!res.ok) return;
 
         const data = await res.json();
-        if (data.status === 'confirmed') {
-          clearInterval(pollTimer);
-          showConfirmed();
-        } else if (data.status === 'rejected') {
-          clearInterval(pollTimer);
-          showRejected();
-        }
-      } catch (err) {
-        // ignore transient network errors, keep polling
-      }
+        if      (data.status === 'confirmed') { clearInterval(pollTimer); showConfirmed(); }
+        else if (data.status === 'rejected')  { clearInterval(pollTimer); showRejected(); }
+      } catch { /* ignore transient errors */ }
     }, 3000);
   }
 
-  // Resume checking if user refreshes the page mid-wait
+  // Resume checking if user refreshes mid-wait
   window.addEventListener('DOMContentLoaded', () => {
     const savedId = localStorage.getItem('paymentRefId');
-    if (savedId) {
-      showPending(savedId);
-      startPolling(savedId);
-    }
+    if (savedId) { showSubmitted(savedId); }
   });
 </script>
 
