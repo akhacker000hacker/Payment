@@ -8,23 +8,21 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
+const BOT_TOKEN     = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const BOT_USERNAME  = process.env.BOT_USERNAME || '';
+const TELEGRAM_API  = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID) {
   console.warn('WARNING: BOT_TOKEN or ADMIN_CHAT_ID not set in .env file!');
 }
 
 // In-memory store of payment requests.
-// Structure: { [uniqueId]: { status, details, messageId, createdAt } }
-// NOTE: This resets if the server restarts. For production, swap this
-// for a real database (e.g. SQLite, MongoDB, Redis).
+// Structure: { [uniqueId]: { status, details, uid, messageId, createdAt } }
 const payments = {};
 
-// Helper: generate a unique, hard-to-guess ID per user/request
 function generateUniqueId() {
-  return crypto.randomBytes(16).toString('hex'); // 32-char hex string
+  return crypto.randomBytes(16).toString('hex');
 }
 
 // Clean up old pending requests every hour (older than 24h)
@@ -37,10 +35,19 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
+// Helper: send a Telegram message to a specific chat
+async function tgSend(chat_id, text, parse_mode = 'MarkdownV2', extra = {}) {
+  return fetch(`${TELEGRAM_API}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id, text, parse_mode, ...extra }),
+  });
+}
+
 // --- 1. User submits payment details from the HTML form ---
 app.post('/api/submit', async (req, res) => {
   try {
-    const { tnxNo, amount, attNo } = req.body;
+    const { tnxNo, amount, attNo, uid } = req.body;
 
     if (!tnxNo || !amount || !attNo) {
       return res.status(400).json({ error: 'Tnx No, Amount and ATT No are all required.' });
@@ -48,18 +55,26 @@ app.post('/api/submit', async (req, res) => {
 
     const id = generateUniqueId();
     payments[id] = {
-      status: 'pending',
-      details: { tnxNo, amount, attNo },
+      status:    'pending',
+      details:   { tnxNo, amount, attNo },
+      uid:       uid || null,   // Telegram user chat ID
       messageId: null,
       createdAt: Date.now(),
     };
 
+    // --- Notify admin ---
+    const userLine = uid
+      ? `👤 User ID: \`${escapeMd(String(uid))}\``
+      : `👤 User ID: _unknown_`;
+
     const text =
       `🔔 *New Payment Request*\n\n` +
+      `${userLine}\n` +
       `🧾 Tnx No: ${escapeMd(tnxNo)}\n` +
-      `💰 Amount: ${escapeMd(String(amount))}\n` +
+      `💰 Amount: ₹${escapeMd(String(amount))}\n` +
       `📱 ATT No: ${escapeMd(attNo)}\n` +
-      `\n🆔 Ref: \`${id}\``;
+      `\n🆔 Ref: \`${id}\`\n\n` +
+      (uid ? `_Use_ \`/addcredit ${uid} <credits>\` _after confirming\\._` : '');
 
     const tgRes = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: 'POST',
@@ -72,7 +87,7 @@ app.post('/api/submit', async (req, res) => {
           inline_keyboard: [
             [
               { text: '✅ Confirm', callback_data: `confirm_${id}` },
-              { text: '❌ Reject', callback_data: `reject_${id}` },
+              { text: '❌ Reject',  callback_data: `reject_${id}` },
             ],
           ],
         },
@@ -93,82 +108,66 @@ app.post('/api/submit', async (req, res) => {
   }
 });
 
-// --- 2. HTML page polls this endpoint to check confirmation status ---
+// --- 2. Expose bot config to frontend (for redirect button) ---
+app.get('/api/config', (req, res) => {
+  res.json({ botUsername: BOT_USERNAME });
+});
+
+// --- 3. HTML page polls this endpoint to check confirmation status ---
 app.get('/api/status/:id', (req, res) => {
   const record = payments[req.params.id];
   if (!record) return res.status(404).json({ error: 'Not found' });
   res.json({ status: record.status, details: record.details });
 });
 
-// --- 3. Telegram webhook: receives button clicks from the admin ---
-app.post('/webhook', async (req, res) => {
+// --- 4. Admin confirmation/rejection callback from Bot API ---
+app.post('/api/admin/:action/:id', async (req, res) => {
   try {
-    const update = req.body;
+    const { action, id } = req.params;
+    const record = payments[id];
 
-    if (update.callback_query) {
-      const cb = update.callback_query;
-      const data = cb.data || '';
+    if (!record) {
+      return res.status(404).json({ error: 'Payment request not found or expired.' });
+    }
 
-      let action = null;
-      let id = null;
-      if (data.startsWith('confirm_')) {
-        action = 'confirm';
-        id = data.slice('confirm_'.length);
-      } else if (data.startsWith('reject_')) {
-        action = 'reject';
-        id = data.slice('reject_'.length);
-      }
+    if (action !== 'confirm' && action !== 'reject') {
+      return res.status(400).json({ error: 'Invalid action' });
+    }
 
-      const record = id ? payments[id] : null;
+    record.status = action === 'confirm' ? 'confirmed' : 'rejected';
 
-      if (record && action) {
-        record.status = action === 'confirm' ? 'confirmed' : 'rejected';
-
-        await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            callback_query_id: cb.id,
-            text: action === 'confirm' ? 'Payment confirmed ✅' : 'Payment rejected ❌',
-          }),
-        });
-
-        const statusLine =
-          record.status === 'confirmed' ? '✅ *CONFIRMED*' : '❌ *REJECTED*';
-
-        await fetch(`${TELEGRAM_API}/editMessageText`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: cb.message.chat.id,
-            message_id: cb.message.message_id,
-            text: `${cb.message.text}\n\n${statusLine}`,
-            parse_mode: 'MarkdownV2',
-          }),
-        });
+    // --- Notify the USER in Telegram ---
+    const userChatId = record.uid;
+    if (userChatId) {
+      const { amount } = record.details;
+      if (action === 'confirm') {
+        await tgSend(
+          userChatId,
+          `✅ *Payment Confirmed\\!*\n\n` +
+          `Your payment of *₹${escapeMd(String(amount))}* has been approved\\.\n` +
+          `An admin will add your credits to your account shortly\\.\n\n` +
+          `Return to the bot and send your APK to continue\\.`,
+        );
       } else {
-        // Unknown / expired reference
-        await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            callback_query_id: cb.id,
-            text: 'Request not found or expired.',
-          }),
-        });
+        await tgSend(
+          userChatId,
+          `❌ *Payment Rejected*\n\n` +
+          `Your payment of *₹${escapeMd(String(amount))}* could not be verified\\.\n` +
+          `Please contact support or try again with the correct details\\.`,
+        );
       }
     }
 
-    res.sendStatus(200);
+    res.json({ success: true, status: record.status });
   } catch (err) {
     console.error(err);
-    res.sendStatus(200); // Always 200 so Telegram doesn't retry endlessly
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Escape MarkdownV2 special characters so Telegram doesn't reject the message
+// Escape MarkdownV2 special characters
 function escapeMd(str) {
-  return String(str).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+  return String(str).replace(/[_*[\]()~`>#+=|{}.!\-\\]/g, '\\$&');
 }
 
 const PORT = process.env.PORT || 3000;
